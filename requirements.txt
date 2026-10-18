@@ -1,0 +1,14 @@
+numpy
+torch
+segmentation-models-pytorch
+rasterio
+geopandas
+shapely
+pystac-client
+planetary-computer
+odc-stac
+rioxarray
+mlflow
+optuna
+matplotlib
+pytest
