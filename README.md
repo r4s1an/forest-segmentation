@@ -6,41 +6,49 @@ vectorized into polygons with areas in hectares. It is a time-boxed portfolio ex
 on free tools (Kaggle T4 GPU, Microsoft Planetary Computer, MLflow, Optuna).
 
 The emphasis of this repository is **honest evaluation**: a three-way geographic split with buffer
-zones, a test block that was evaluated exactly once, an all-forest baseline reported next to every
-score, a seed check on the hyperparameter search, and a list of everything that limits the result.
+zones, a test block that no decision was based on, an all-forest baseline next to every score,
+learning curves, seed checks on the hyperparameter search, three independent runs of the whole
+pipeline, and a list of everything that limits the result.
 
 ## Headline results
 
 | Split | Evaluation method | Forest IoU | Non-forest IoU | mIoU | All-forest baseline mIoU |
 |---|---|---|---|---|---|
-| Validation (used for checkpoint and hyperparameter selection, so optimistic) | 256 px tiles, 30 overlapping tiles | 0.851 | 0.721 | 0.786 | 0.350 |
-| **Test (evaluated once, never used for any decision)** | block-wise sliding window | **0.937** | **0.594** | **0.766** | 0.446 |
+| Validation (used for checkpoint and hyperparameter selection, so optimistic) | 256 px tiles, 30 overlapping tiles | 0.878 | 0.736 | 0.807 | 0.350 |
+| **Test, Run 3 (final model in this repository)** | block-wise sliding window | **0.946** | **0.584** | **0.765** | 0.446 |
+| Test, Run 2 (an independently trained earlier model, same split) | block-wise sliding window | 0.937 | 0.594 | 0.766 | 0.446 |
 
-- The model clearly beats the trivial "everything is forest" baseline on both splits (test mIoU
-  0.766 vs 0.446).
-- The test block is 89% forest, so its forest IoU is inflated by class imbalance: a constant
-  "forest" prediction already scores 0.892. The informative numbers there are **non-forest IoU and
-  mIoU**, and non-forest IoU rests on only about 960 ha of non-forest area (10.8% of the block).
-- The validation-to-test drop (mIoU 0.786 to 0.766) is within the seed-to-seed spread measured below
-  (std 0.024), and non-forest IoU falls partly because that class shrinks from 30% of the validation
-  block to 11% of the test block.
-- Hyperparameter tuning gave **no measurable gain**: tuned and default settings both average 0.78
-  mIoU over three fresh seeds.
+- The model clearly beats the trivial "everything is forest" baseline: test mIoU 0.765 against
+  0.446. Two independently trained models gave the same test mIoU (0.766 and 0.765).
+- The test block is 89% forest, so its forest IoU is inflated by class imbalance (a constant
+  "forest" prediction already scores 0.892). The informative numbers there are **non-forest IoU
+  and mIoU**, and non-forest IoU rests on only about 960 ha of non-forest area (10.8% of the block).
+- Test mIoU is about 0.04 below validation mIoU. Part of that is selection optimism (the validation
+  score is the maximum over noisy epochs) and part is that non-forest shrinks from 30% of the
+  validation block to 11% of the test block.
+- Hyperparameter tuning gave at most a small, inconsistent gain; the learning curves point to data
+  and label quality as the ceiling (details below).
 
 ## Key findings
 
 1. **Dense forest is segmented almost perfectly; the mixed farmland-and-village strip is hard.**
-   Validation error is about 4-5% in forest-interior tile rows and 22% in the northernmost strip,
-   where only 46% of the label is forest.
-2. **The final model under-predicts forest** in held-out areas (validation false negatives 8.5% of
-   pixels vs false positives 2.3%).
-3. **The model is insensitive to the hyperparameters searched.** 20 Optuna trials spanned only
-   0.761-0.808 validation mIoU, and 17 of them landed within 0.02 of each other. Data size and label
-   quality are the more likely limits.
-4. **Total forest area matches WorldCover to the hectare (39,513 ha) only because errors cancel**
-   across regions. Area agreement is not accuracy.
-5. **The best checkpoint came from epoch 1 of 15, and training dynamics were not diagnosed before
-   the test was run.** See [Open issue](#open-issue-training-dynamics).
+   Validation error is about 4% in forest-interior tile rows and 22% in the northernmost strip,
+   where only 46% of the label is forest. The same strip was the worst area in all runs.
+2. **The result replicates.** Two independently trained models (different configurations and
+   checkpoints) scored the same test mIoU (0.766 and 0.765).
+3. **Systematic bias is not stable between runs.** One model under-predicted forest (false
+   negatives 8.5% of validation pixels vs false positives 2.3%) and matched the total forest area
+   to the hectare through cancelling errors; the final model is balanced on validation (4.6% vs
+   4.5%) but over-predicts total forest area by 3.7%. Area agreement with WorldCover should not be
+   read as accuracy.
+4. **Validation scores plateau after about 3 epochs and then bounce by roughly +-0.02.** Picking the
+   best epoch on 30 overlapping tiles selects noise; the test score did not care (see item 2).
+5. **A high constant learning rate is unstable here.** A diagnostic run with lr 7.85e-4 had training
+   and validation mIoU collapsing at some epochs, while lr 2e-4 with cosine decay settled at a
+   stable plateau of about 0.79 validation mIoU.
+6. **Tuning did not clearly help**: gains over the default were +0.017, -0.001 and +0.024 mIoU in
+   three searches, against seed-to-seed spread of 0.02-0.04. The tuned runs did vary less between
+   seeds in all three searches.
 
 ## Data and labels
 
@@ -53,7 +61,8 @@ score, a seed check on the hyperparameter search, and a list of everything that 
 | Labels | ESA WorldCover 2021, class 10 ("Tree cover") = forest, everything else = non-forest, resampled onto the Sentinel-2 grid with nearest neighbour |
 | Forest share | 77.8% of the scene (3,951,300 forest pixels, 39,513 ha) |
 
-The two rasters were verified to share transform, shape and CRS (`gdalinfo`, `rasterio`).
+The two rasters were verified to share transform, shape and CRS (`gdalinfo`, `rasterio`). All three
+runs used the same files (same grid and label totals).
 
 **Label caveat:** WorldCover is itself a model-derived product, partly built from Sentinel-2, so the
 network learns to imitate it rather than to match ground truth, and agreement may be partly circular.
@@ -71,13 +80,15 @@ rows 1256..2276   TRAIN      |              |   TEST
 |---|---|---|---|
 | Train | 2276 x 1100 | 0.775 | Fitting the weights (112 tiles of 256 x 256, stride 128) |
 | Validation | 1000 x 876 | 0.700 | Per-epoch monitoring, checkpoint choice, hyperparameter search (30 tiles, stride 128) |
-| Test | 1020 x 876 | 0.892 | One final evaluation |
+| Test | 1020 x 876 | 0.892 | Final evaluation of finished models |
 
 - A **256 px (2.56 km) buffer** separates every pair of blocks. Tiles never cross a block edge. Both
   properties are enforced by unit tests.
 - Input bands are normalized with **training-block statistics only**.
-- The test block was **not even tiled** during development. It was predicted once, after the final
-  model was chosen, and no model, threshold or split was changed afterwards.
+- The test block was **not tiled** during development and was predicted only after a final model had
+  been chosen. **No model, threshold, split or setting was changed after seeing a test result.**
+- The test block was scored **twice**, by two independently trained models (Run 2 and Run 3,
+  identical protocol). Both results are reported above; neither was picked for being better.
 - Buffers reduce but do not remove spatial autocorrelation, so this test is weaker than an
   independent region would be (see [Limitations](#limitations)).
 
@@ -89,10 +100,9 @@ rows 1256..2276   TRAIN      |              |   TEST
 | Loss | Dice + `bce_w` x binary cross-entropy |
 | Optimizer | AdamW, constant learning rate (no schedule) |
 | Augmentation | random 90-degree rotations and horizontal flips |
-| Final settings | lr 7.85e-4, weight decay 1.32e-4, `bce_w` 1.255, batch size 8, 15 epochs, seed 0 |
-| Checkpoint | best validation mIoU, reached at epoch 1 (the second epoch, counting from 0) |
-| Compute | one epoch takes about 3-6 s on a Kaggle T4 |
-| Inference | threshold 0.5; block prediction uses 256 px windows at stride 128 with averaged probabilities |
+| Final settings (Run 3) | lr 4.80e-4, weight decay 2.44e-4, `bce_w` 1.474, batch size 16, 15 epochs, seed 0 |
+| Checkpoint | best validation mIoU, reached at epoch 7 (counting from 0) |
+| Inference | threshold 0.5; block prediction uses 256 px windows at stride 128 with averaged probabilities (42 windows for the test block) |
 
 ## Results in detail
 
@@ -100,33 +110,72 @@ rows 1256..2276   TRAIN      |              |   TEST
 
 | Metric | Value |
 |---|---|
-| Forest IoU / non-forest IoU / mIoU | 0.851 / 0.721 / 0.786 |
-| Forest Dice / pixel accuracy | 0.920 / 0.893 |
-| False positive / false negative pixels | 2.26% / 8.48% |
-| Non-forest recall / precision | 0.925 / 0.766 |
+| Forest IoU / non-forest IoU / mIoU | 0.878 / 0.736 / 0.807 |
+| Forest Dice / pixel accuracy | 0.935 / 0.909 |
+| False positive / false negative pixels | 4.51% / 4.62% |
+| Non-forest recall / precision | 0.850 / 0.847 |
 | All-forest baseline (accuracy = forest IoU) | 0.700 |
 
-### Test (evaluated once)
+### Test
 
-| Metric | Model | All-forest baseline |
-|---|---|---|
-| Forest IoU | 0.937 | 0.892 |
-| Non-forest IoU | 0.594 | 0.000 |
-| mIoU | 0.766 | 0.446 |
-| Non-forest share of block | 10.8% (about 960 ha) | |
+| Metric | Run 3 (final) | Run 2 | All-forest baseline |
+|---|---|---|---|
+| Forest IoU | 0.946 | 0.937 | 0.892 |
+| Non-forest IoU | 0.584 | 0.594 | 0.000 |
+| mIoU | 0.765 | 0.766 | 0.446 |
+| Non-forest share of block | 10.8% (about 960 ha) | | |
 
-Test inference covers the whole 1020 x 876 block (about 8,935 ha) with 42 overlapping windows and
-scores every non-nodata pixel. The test set is therefore **one contiguous block, not many
-independent samples**, and the non-forest IoU is a noisy estimate (a different 960 ha of non-forest
-could move it by several points).
+Test inference covers the whole 1020 x 876 block (about 8,935 ha) and scores every non-nodata pixel.
+The test set is **one contiguous block, not many independent samples**, so the non-forest IoU is a
+noisy estimate (a different 960 ha of non-forest could move it by several points). Replicating the
+score with a second model shows stability to training noise, not generalization to new regions,
+because both models were scored on the same block.
 
 **Validation and test are not computed identically.** Validation during training uses discrete tiles
 without overlap averaging, while the test uses block-wise sliding-window inference with averaged
-overlaps (the same function that produces the forest map). Averaging overlapping predictions acts
-like a small ensemble and can help slightly. As a rough check, evaluating the validation block with
-the sliding-window function (windows allowed to read neighbouring pixels) gives forest IoU 0.830 and
-non-forest IoU 0.755 (mIoU about 0.79), against 0.851 / 0.721 (0.786) from the tile-based
-evaluation, so the method moves per-class scores by 0.02-0.03 but barely moves mIoU.
+overlaps (the same function that produces the forest map). As a rough check, scoring the validation
+block with the sliding-window function (windows may read neighbouring pixels) gives forest IoU 0.847
+and non-forest IoU 0.750 (mIoU about 0.80), against 0.878 / 0.736 (0.807) from the tile-based
+evaluation. The method moves per-class scores by 0.01-0.03 but barely moves mIoU.
+
+### Learning curves
+
+![validation curve of the final run](results/validation_curve.png)
+
+**Final run, validation per epoch (values read from the plot, approximate).** Validation mIoU rises
+from about 0.47 (epoch 0) to about 0.79 by epoch 3, then plateaus and bounces between roughly 0.76
+and 0.81. The logged maximum is 0.807 at epoch 7. Selecting the best of 15 epochs on this curve
+picks a noise peak.
+
+![training diagnostic](results/learning_curves.png)
+
+**Diagnostic run: 30 epochs, training metrics logged** (batch size 8, `bce_w` 1.255, weight decay
+1.3e-4; values read from the plot, approximate). Note that setting A is the winner of an *earlier*
+search (Run 2), not the final Run 3 configuration (lr 4.8e-4, batch 16), so the diagnostic shows the
+behaviour of a high learning rate in general rather than of the final model exactly.
+
+| | A: lr 7.9e-4, constant | B: lr 2e-4, cosine decay |
+|---|---|---|
+| Training loss (with augmentation) | falls to about 0.25 by epoch 15 | falls more slowly to about 0.28 |
+| Train mIoU (no augmentation) | rises to about 0.85, dips to about 0.81 at epoch 21, drops to about 0.76 at epoch 29 | rises smoothly to about 0.85 and stays |
+| Validation mIoU | zigzags between 0.74 and 0.78, falls to about 0.68 at epoch 29 | peak of about 0.81 at epoch 7, then stable at about 0.79 |
+
+What the curves show:
+
+- **The model learns**: training loss falls from about 0.9 to about 0.3 and training mIoU reaches
+  about 0.85 in both settings.
+- **Setting A is unstable**: both training and validation mIoU collapse at isolated epochs while the
+  training loss looks normal. A plausible mechanism is unstable BatchNorm statistics under a high
+  learning rate at batch size 8, but this was **not tested**.
+- **A stable run plateaus at about 0.79 validation mIoU**, about 0.02 below the best-epoch values
+  (0.807-0.815) reported for the checkpoints, which is a rough estimate of how optimistic checkpoint
+  selection on this validation set is.
+- **The train-validation gap is modest** (about 0.06 mIoU, partly because the validation block has
+  30% non-forest against 22% in train), and training mIoU itself plateaus near 0.85. The model does
+  not fit even its own training area well, which points to label noise and 10 m resolution rather
+  than memorization.
+- Together with the flat hyperparameter search, this suggests the ceiling is set by **data and
+  labels, not by the settings searched**.
 
 ### Hyperparameter search (Optuna, tracked in MLflow)
 
@@ -135,11 +184,11 @@ TPE sampler (seed 0), 20 trials of 8 epochs each, optimizing validation mIoU. Se
 0.25 to 2.0, batch size {8, 16}. Trial 0 was the default configuration (resnet34, lr 3e-4,
 weight decay 1e-2, `bce_w` 1.0, batch size 16).
 
-| | Validation mIoU |
+| | Run 3 validation mIoU |
 |---|---|
 | Default configuration (trial 0) | 0.798 |
-| Best trial (trial 15) | 0.808 |
-| Median / min / max of 20 trials | 0.795 / 0.761 / 0.808 |
+| Best trial (trial 18: resnet34, lr 4.8e-4, batch 16) | 0.809 |
+| Median / min / max of 20 trials | 0.797 / 0.758 / 0.809 |
 
 The best of 20 noisy scores is optimistically biased (the "winner's curse"), which is why the seed
 check below matters.
@@ -150,56 +199,66 @@ Default and tuned settings, 8 epochs, three fresh seeds each (validation mIoU, p
 
 | | Seed 1 | Seed 2 | Seed 3 | Mean | Std |
 |---|---|---|---|---|---|
-| Default | 0.803 | 0.748 | 0.794 | 0.781 | 0.024 |
-| Tuned | 0.781 | 0.772 | 0.788 | 0.780 | 0.007 |
+| Default | 0.784 | 0.726 | 0.817 | 0.776 | 0.038 |
+| Tuned | 0.799 | 0.781 | 0.820 | 0.800 | 0.016 |
 
-The means are identical, so **the tuning gain is zero within seed noise**. The tuned runs vary less
-(std 0.007 vs 0.024), but with three runs that spread is itself uncertain. Differences below roughly
-0.04 mIoU should be treated as noise on this validation set.
+Tuned beat default on all three seeds here, but by +0.015, +0.055 and +0.003, and most of the gap
+comes from one poor default run (seed 2). With three seeds and a default spread of 0.038, this is
+suggestive, not conclusive.
 
-### Run-to-run variation across sessions
+### Three runs of the whole pipeline
 
-The whole pipeline ran twice on the same split and data (the first session's model was lost when
-that session ended, and the test was evaluated only on the second). Same configuration and seed
-gave different results:
+The whole pipeline (search, seed check, final training) was run three times on the same data and
+split. Run 1's final model was lost when its session ended, before any test evaluation. Run 2 and
+Run 3 were evaluated on the test block. All identical code and seeds; GPU training is not
+bit-reproducible.
 
-| | Session 1 | Session 2 (reported) |
-|---|---|---|
-| Trial 1 (lr 4.0e-4, batch 8) validation mIoU | 0.811 | 0.798 |
-| Best trial in the search | 0.811 | 0.808 |
-| Seed check, tuned config (mean / std) | 0.798 / 0.009 | 0.780 / 0.007 |
-| Seed check, default config (mean / std) | 0.781 / 0.034 | 0.781 / 0.024 |
-| Final model validation mIoU (best epoch) | 0.815 (epoch 4) | 0.786 (epoch 1) |
+| | Run 1 | Run 2 | Run 3 (final) |
+|---|---|---|---|
+| Trial 0, default config | 0.798 | 0.798 | 0.798 |
+| Trial 1, identical config in every run | 0.811 | 0.798 | 0.798 |
+| Best trial in the search | 0.811 | 0.808 | 0.809 |
+| Winning config (lr, batch size) | 4.0e-4, 8 | 7.9e-4, 8 | 4.8e-4, 16 |
+| Seed check, default: mean / std | 0.781 / 0.034 | 0.781 / 0.024 | 0.776 / 0.038 |
+| Seed check, tuned: mean / std | 0.798 / 0.009 | 0.780 / 0.007 | 0.800 / 0.016 |
+| Final model validation mIoU (best epoch) | 0.815 (4) | 0.786 (1) | 0.807 (7) |
+| Validation false positive / false negative | 3.9% / 4.9% | 2.3% / 8.5% | 4.5% / 4.6% |
+| Test mIoU | not evaluated | 0.766 | 0.765 |
+| Whole-scene predicted vs label forest area | not computed | 0.0% | +3.7% |
 
-GPU training is not bit-reproducible even with fixed seeds, and on 30 overlapping validation tiles
-the same configuration can move by 0.01-0.03 mIoU. Only the second session's numbers are used in this
-README, and no result was picked from the better of the two sessions.
+- The winning configuration differs every time, another sign the search surface is flat.
+- Tuned minus default mean was +0.017, -0.001 and +0.024 (average +0.013); tuned runs varied less
+  between seeds in all three runs (std 0.007-0.016 vs 0.024-0.038).
+- The best epoch ranged from 1 to 7 and validation mIoU from 0.786 to 0.815 across final models, yet
+  test mIoU was 0.766 and 0.765. Validation-based checkpoint choice is noise on a plateau; held-out
+  performance was stable.
+- Error bias and total area varied between runs, so these properties of a single model should not be
+  over-interpreted.
 
-### Error analysis (validation block)
+### Error analysis (validation block, final model)
 
 Error by position, from the 30 validation tiles (6 tile rows x 5 tile columns, stride 128):
 
 | Tile row (scene rows) | Label forest | Predicted forest | Error | False positive | False negative |
 |---|---|---|---|---|---|
-| 0 (0-256) | 0.46 | 0.33 | 0.218 | 0.043 | 0.175 |
-| 1 (128-384) | 0.60 | 0.51 | 0.162 | 0.037 | 0.125 |
-| 2 (256-512) | 0.72 | 0.68 | 0.081 | 0.019 | 0.061 |
-| 3 (384-640) | 0.78 | 0.76 | 0.045 | 0.013 | 0.032 |
-| 4 (512-768) | 0.83 | 0.79 | 0.049 | 0.010 | 0.040 |
-| 5 (640-896) | 0.82 | 0.76 | 0.090 | 0.015 | 0.076 |
+| 0 (0-256) | 0.46 | 0.43 | 0.217 | 0.095 | 0.122 |
+| 1 (128-384) | 0.60 | 0.60 | 0.131 | 0.067 | 0.063 |
+| 2 (256-512) | 0.72 | 0.74 | 0.062 | 0.040 | 0.023 |
+| 3 (384-640) | 0.78 | 0.79 | 0.042 | 0.025 | 0.017 |
+| 4 (512-768) | 0.83 | 0.82 | 0.037 | 0.018 | 0.020 |
+| 5 (640-896) | 0.82 | 0.81 | 0.059 | 0.026 | 0.033 |
 
-- **Error falls as the forest share rises**, from 22% in the northern mixed strip to about 4-5% in
+- **Error falls as the forest share rises**, from 22% in the northern mixed strip to about 4% in
   the forest interior.
-- **Missed forest dominates everywhere** (the false-negative column), and the predicted forest share
-  is lower than the label in every row, so this model under-predicts forest.
-- The worst tiles by error rate are 0 (0.273), 1 (0.266), 29 (0.236) and 2 (0.211); the best are 15
-  (0.001) and 16 (0.004). Tiles 0, 1 and 2 are neighbours in the top row and overlap by 50%, so
-  they are one failure area seen three times, not three independent failures. Tile 29 is the
-  bottom-right tile of the block.
+- In this model the predicted forest share tracks the label closely in every row; false positives
+  and false negatives are balanced overall (4.5% / 4.6%).
+- The worst tiles are 4 (0.260), 1 (0.245), 2 (0.219) and 3 (0.189), all in the top tile row and
+  neighbours overlapping by 50%, so they are **one failure strip seen several times, not independent
+  failures**. The best tiles are 15 and 20 (0.001, continuous dense forest).
 
-Failure modes, as observed in the **earlier session's** error figure (same data and split, worst
-tiles 0, 1, 2 and 4, all in the village-and-farmland strip). The causes are plausible hypotheses and
-were not tested:
+Failure modes, as observed in the error figure of **Run 1** (same data and split; worst tiles were
+in the same village-and-farmland strip). Run 3's figure was not inspected in detail, and the causes
+are plausible hypotheses that were not tested:
 
 1. Green irrigated crop fields predicted as forest. In a June-August composite, crops can resemble
    canopy in both visible and near-infrared bands.
@@ -207,8 +266,6 @@ were not tested:
    or the model is right here cannot be decided from 10 m imagery.
 3. Thin boundary errors around settlements, from mixed pixels, very fragmented labels and smoother
    predicted masks.
-
-Figures: `results/error_analysis.png` (best and worst tiles: image, label, prediction, errors).
 
 ![error analysis](results/error_analysis.png)
 
@@ -221,23 +278,27 @@ mark the three blocks):
 
 | Quantity | Value |
 |---|---|
-| Predicted forest, raster | 39,513 ha |
-| Predicted forest, polygons >= 1 ha | 39,381 ha (146 polygons) |
+| Predicted forest, raster | 40,984 ha |
+| Predicted forest, polygons >= 1 ha | 40,846 ha (115 polygons) |
 | WorldCover forest | 39,513 ha |
-| Pixels where prediction and label disagree | 413,243 of 5,080,032 (8.1%) |
+| Pixels where prediction and label disagree | 357,877 of 5,080,032 (7.0%) |
 
-The raster total equals the label total to the hectare (3,951,333 vs 3,951,300 pixels), but the
-regional breakdown shows cancelling errors:
+The model **over-predicts total forest area by 3.7%** (4,098,359 vs 3,951,300 pixels), and it does so
+in every region:
 
 | Region | Predicted | Label | Difference |
 |---|---|---|---|
-| Train block (in-sample) | 20,005 ha | 19,274 ha | +731 ha (+3.8%) |
-| Validation block | 5,040 ha | 5,493 ha | -453 ha (-8.2%) |
-| Rest (gaps and test block) | about 14,468 ha | about 14,745 ha | -277 ha (-1.9%) |
+| Train block (in-sample) | 20,246 ha | 19,274 ha | +972 ha (+5.0%) |
+| Validation block | 5,588 ha | 5,493 ha | +95 ha (+1.7%) |
+| Rest (gaps and test block) | 15,149 ha | 14,745 ha | +404 ha (+2.7%) |
 
 Block-wise whole-scene scores (windows may read pixels across block edges): train block forest IoU
-0.905 / non-forest IoU 0.692 (in-sample, and only 0.9 forest IoU, so the model is not memorizing the
-training area); validation block 0.830 / 0.755.
+0.916 / non-forest IoU 0.717 (in-sample; a model that was memorizing its training area would score
+far higher); validation block 0.847 / 0.750.
+
+For comparison, Run 2's total area matched WorldCover to the hectare (39,513 ha), but only through
+cancelling errors across regions (+3.8% in train, -8% in validation, -1.9% elsewhere). Neither
+total says anything reliable about accuracy.
 
 ### Earlier experiment: NIR ablation (superseded split)
 
@@ -251,8 +312,7 @@ ablation: RGB vs RGB+NIR, 8 epochs, 2 seeds each.
 
 NIR helped non-forest IoU on both seeds (about +0.04) while the mIoU gain (+0.024) was comparable
 to the seed spread. **This ablation was not repeated on the final split**, and given the seed noise
-measured later (std about 0.02-0.03), it should be treated as suggestive only. The final model uses
-all four bands.
+measured later, it should be treated as suggestive only. The final model uses all four bands.
 
 ## How to read these numbers
 
@@ -264,45 +324,40 @@ all four bands.
 - **Minority-class IoU drops when the class gets rarer**, even at the same per-pixel error rate.
   Non-forest is 30% of validation but 11% of test, so the lower test non-forest IoU is not by itself
   evidence of poor generalization.
+- **Differences below about 0.04 mIoU between single runs should be treated as noise** on this
+  validation set.
 
 ## Limitations
 
 1. **Labels are model-derived** and noisy in mixed areas, and may be partly circular with the
    Sentinel-2 inputs.
-2. **The best checkpoint came from epoch 1 of 15** with a high constant learning rate, and the
-   training curve was not examined before the test was run (see below).
-3. **Small and noisy validation set**: 30 tiles with 50% overlap (about 8 independent tiles'
+2. **Small and noisy validation set**: 30 tiles with 50% overlap (about 8 independent tiles'
    worth). Checkpoint selection and the hyperparameter search both used it, so validation scores are
-   optimistic and the best-of-20 search result is biased upward.
-4. **The test is one contiguous block** of about 8,935 ha, with about 960 ha of non-forest, from the
+   optimistic by roughly 0.02 and the best-of-20 search result is biased upward.
+3. **The test is one contiguous block** of about 8,935 ha, with about 960 ha of non-forest, from the
    same scene and season as the training data. The buffers reduce, but do not remove, spatial
-   autocorrelation. It is a weaker claim than an independent region.
+   autocorrelation. It is a weaker claim than an independent region, and the block was scored twice
+   (by two different models).
+4. **Training is on a noisy plateau**: the validation curve bounces by about +-0.02, a diagnostic
+   with a high constant learning rate was unstable, and no learning-rate schedule was used for the
+   reported models. The diagnostic was run on a different configuration than the final model, and
+   a model trained with a schedule was **not** produced.
 5. **Validation and test use different inference protocols** (tiles vs block-wise sliding windows).
 6. **One scene, one season, one region.** No claim is made about other regions or years.
-7. **GPU training is not bit-reproducible**, and identical configurations varied by 0.01-0.03 mIoU
-   between sessions.
-8. The failure-mode explanations are hypotheses, and the final model's worst tiles (including
-   tile 29) were not all inspected.
-
-## Open issue: training dynamics
-
-A best epoch of 1 out of 15, an in-sample forest IoU of only 0.905, and a flat hyperparameter search
-suggest the model may be undertrained or training unstably (a learning rate of 7.85e-4 with no
-schedule is high for fine-tuning a pretrained encoder at batch size 8), rather than data-limited.
-This was **not verified**. The planned diagnostic logs training loss, training mIoU and validation
-mIoU per epoch for the current settings and for a gentler learning rate with cosine decay.
-
-Because the test block has already been scored once, any model retrained after this point must be
-reported as a new model, and the current test block then counts as a second validation block. A
-clean final claim would be evaluated once on an independent region.
+7. **GPU training is not bit-reproducible**, and the same configuration varied by 0.01-0.03 mIoU
+   between runs; bias direction and total area also varied between runs.
+8. The failure-mode explanations are hypotheses from an earlier run's figure, and the final model's
+   error figure was not inspected in detail.
 
 ## Next steps
 
-1. Run the training-dynamics diagnostic and retrain with a learning-rate schedule if it shows
-   instability.
-2. Evaluate once on an independent region (for example the Gabala-Shaki foothills of the Greater
-   Caucasus), which would be a stronger test than a block of the same scene.
-3. Evaluate validation and test with the same inference method, and add more seeds.
+1. Train a v2 with a learning-rate schedule (for example lr 2e-4 with cosine decay), fixed epoch
+   count and the **last** epoch kept, so no checkpoint is picked on validation. Report it as a new
+   model.
+2. Evaluate once on an **independent region** (for example the Gabala-Shaki foothills of the Greater
+   Caucasus); that would be a stronger test than a block of the same scene.
+3. Score validation and test with the same inference method, and use more seeds (at least 3 per
+   configuration) for every comparison.
 4. Add a second-season composite (spring) and vegetation indices to help separate crops from forest.
 5. Inspect label errors against high-resolution imagery in the northern strip.
 6. Multi-temporal change detection, and the same pipeline with field-boundary labels for field
@@ -310,11 +365,11 @@ clean final claim would be evaluated once on an independent region.
 
 ## MLOps
 
-- **Experiment tracking: MLflow** (local SQLite backend). 30 runs: a smoke test, the Optuna parent
-  run with 20 nested trials, the seed-check parent run with 6 nested runs, and the final training
-  run. The final run holds the parameters, per-epoch validation metrics, final validation and test
-  metrics, and the artifacts `best.pt`, `norm.npz` (band means and standard deviations) and the
-  error-analysis figure.
+- **Experiment tracking: MLflow** (local SQLite backend). 30 runs in the final session: a smoke test,
+  the Optuna parent run with 20 nested trials, the seed-check parent run with 6 nested runs, and
+  the final training run. The final run holds the parameters, per-epoch validation metrics, final
+  validation and test metrics, and the artifacts `best.pt`, `norm.npz` (band means and standard
+  deviations) and the error-analysis figure.
 - **Hyperparameter search: Optuna** (TPE), with trial 0 pinned to the defaults so the "before
   tuning" reference comes for free.
 - `mlflow.db` and `mlruns/` are not committed (see `.gitignore`); a screenshot of the run comparison
@@ -331,14 +386,15 @@ forest_seg/          tested helper code
   metrics.py         confusion counts, IoU / Dice / accuracy
   vectorize.py       mask -> polygons with area in hectares
 tests/test_core.py   7 unit tests
-notebooks/           the full experiment notebook (data download, training, search, evaluation)
-results/             error_analysis.png, forest_map.png, mlflow_runs.png, forest.geojson
+notebooks/           the full experiment notebook (data download, search, training, evaluation)
+results/             validation_curve.png, learning_curves.png, error_analysis.png,
+                     forest_map.png, mlflow_runs.png, forest.geojson
 requirements.txt
 ```
 
-To reproduce: open the notebook on a GPU runtime with internet access, run it top to bottom (the
+To reproduce: open the notebook on a GPU runtime with internet access and run it top to bottom (the
 data download uses the free Planetary Computer API, which rate-limits shared machines; a second
-public source, AWS Earth Search plus the open WorldCover tile, works as a fallback), and run
-`python -m pytest -q` for the tests. Expect the numbers to vary by the amounts documented above.
+public source, AWS Earth Search plus the open WorldCover tile, works as a fallback), then run
+`python -m pytest -q`. Expect the numbers to vary by the amounts documented above.
 
 Contains modified Copernicus Sentinel data (2021). ESA WorldCover 2021 (c) ESA, CC BY 4.0.
